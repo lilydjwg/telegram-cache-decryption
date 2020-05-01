@@ -1,0 +1,204 @@
+#!/usr/bin/python3
+
+import hashlib
+import cffi
+import os
+
+from PyQt5 import QtCore
+
+def read_map(name):
+  qstream = readFile(name)
+  salt = qstream.readBytes()
+  key_encrypted = qstream.readBytes()
+  map_encrypted = qstream.readBytes()
+  map_encrypted
+
+  PassKey = createLocalKey(b'', salt)
+  keyData = decryptLocal(key_encrypted, PassKey)
+  LocalKey = keyData
+  return LocalKey
+
+def sha1(data):
+  m = hashlib.sha1()
+  m.update(data)
+  return m.digest()
+
+def sha256(data):
+  m = hashlib.sha256()
+  m.update(data)
+  return m.digest()
+
+def prepareAES_oldmtp(key, msgKey):
+  data_a = msgKey[:16] + key[8:40]
+  sha1_a = sha1(data_a)
+
+  data_b = key[40:56] + msgKey[:16] + key[56:72]
+  sha1_b = sha1(data_b)
+
+  data_c = key[72:104] + msgKey[:16]
+  sha1_c = sha1(data_c)
+
+  data_d = msgKey[:16] + key[104:136]
+  sha1_d = sha1(data_d)
+
+  aesKey = sha1_a[:8] + sha1_b[8:20] + sha1_c[4:16]
+  aesIV = sha1_a[8:20] + sha1_b[:8] + sha1_c[16:20] + sha1_d[:8]
+
+  assert len(data_a) == 48
+  assert len(data_b) == 48
+  assert len(data_c) == 48
+  assert len(data_d) == 48
+
+  return aesKey, aesIV
+
+ffi = cffi.FFI()
+ffi.cdef('''
+void aesIgeDecryptRaw(
+    const unsigned char *src,
+    unsigned char *dst,
+    size_t len,
+    const unsigned char *key,
+    unsigned char *iv);
+
+int PKCS5_PBKDF2_HMAC_SHA1(
+         const char *pass, int passlen,
+         const unsigned char *salt, int saltlen, int iter,
+         int keylen, unsigned char *out);
+
+void my_CRYPTO_ctr128_encrypt(
+    const unsigned char *src,
+    unsigned char *dst,
+    size_t len,
+    const unsigned char *key,
+    int keysize,
+    uint64_t block_index,
+    unsigned char *iv);
+''')
+mydir = os.path.dirname(__file__)
+ffi_openssl = ffi.dlopen(os.path.join(mydir, './ffi_openssl.so'))
+ffi_crypto = ffi.dlopen('libcrypto.so')
+
+def aesDecryptLocal(src, key, key128):
+  aesKey, aesIV = prepareAES_oldmtp(key, key128)
+  dst = bytearray(len(src))
+  buffer = ffi.from_buffer(dst)
+  ffi_openssl.aesIgeDecryptRaw(
+    src, buffer, len(src), aesKey, aesIV)
+  return dst
+
+def decryptLocal(encrypted, key):
+  encryptedKey = encrypted[:16]
+  decrypted = aesDecryptLocal(
+    encrypted[16:], key, encryptedKey)
+  if sha1(decrypted)[:16] != encryptedKey:
+    raise ValueError('bad checksum for decrypted data')
+
+  dataLen = int.from_bytes(decrypted[:4], 'little')
+  return decrypted[4:dataLen]
+
+keySize = 256
+
+def createLocalKey(passcode, salt):
+  iterCount = 4000 if passcode else 4
+
+  dst = bytearray(keySize)
+  buffer = ffi.from_buffer(dst)
+  ffi_crypto.PKCS5_PBKDF2_HMAC_SHA1(
+    passcode, len(passcode),
+    salt, len(salt),
+    iterCount,
+    keySize,
+    buffer,
+  )
+  return dst
+
+def readFile(name):
+  with open(name, 'rb') as f:
+    if f.read(4) != b'TDF$':
+      raise ValueError('wrong file type')
+
+    version = f.read(4)
+    data = f.read()
+
+  m = hashlib.md5()
+  m.update(data[:-16])
+  data_size = len(data)-16
+  m.update(data_size.to_bytes(4, 'little'))
+  m.update(version)
+  m.update(b'TDF$')
+  digest = m.digest()
+
+  if digest != data[-16:]:
+    raise ValueError('checksum mismatch')
+
+  qbytes = QtCore.QByteArray(data)
+  return QtCore.QDataStream(qbytes)
+
+def readEncryptedFile(name, key):
+  qstream = readFile(name)
+  encrypted = qstream.readBytes()
+  return decryptLocal(encrypted, key)
+
+def storage_file_read(path, key):
+  with open(path, 'rb') as f:
+    if f.read(4) != b'TDEF':
+      raise ValueError('wrong file type')
+
+    salt = f.read(64)
+    encrypted = f.read(16 + 32)
+
+    real_key = sha256(key[:len(key)//2] + salt[:32])
+    iv = sha256(key[len(key)//2:] + salt[32:])[:16]
+    d = decryptor(real_key, iv)
+
+    data = d.decrypt(encrypted)
+    checksum = data[16:]
+
+    if sha256(key + salt + data[:16]) != checksum:
+      raise ValueError('wrong key')
+
+    return d.decrypt(f.read())
+
+class decryptor:
+  block_index = 0
+
+  def __init__(self, key, iv):
+    self.key = key
+    self.iv = iv
+
+  def decrypt(self, src):
+    dst = bytearray(len(src))
+    buffer = ffi.from_buffer(dst)
+    iv = ffi.from_buffer(bytearray(self.iv))
+    ffi_openssl.my_CRYPTO_ctr128_encrypt(
+      src, buffer, len(src),
+      self.key, len(self.key) * 8,
+      self.block_index, iv
+    )
+    self.block_index += len(src) // 16
+    return dst
+
+def main():
+  import os
+
+  LocalKey = read_map('~/.local/share/TelegramDesktop/tdata/XXXXX/map0')
+
+  topdir = os.path.expanduser('~/.local/share/TelegramDesktop/tdata/user_data')
+  for root, dirs, files in os.walk(topdir):
+    if files:
+      newdir = root[len(topdir):].lstrip('/')
+      os.makedirs(newdir, exist_ok=True)
+
+    for name in files:
+      if name in ['version', 'binlog']:
+        continue
+
+      path = os.path.join(root, name)
+      print('Decrypting', path)
+      data = storage_file_read(path, LocalKey)
+      newf = os.path.join(newdir, name)
+      with open(newf, 'wb') as f:
+        f.write(data)
+
+if __name__ == '__main__':
+  main()
