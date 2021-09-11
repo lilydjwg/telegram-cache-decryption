@@ -1,6 +1,6 @@
 # telegram-cache-decryption
 
-NOTICE: this no longer works and I'm not planning any update in near future.
+**NOTICE**: this no longer works and I'm not planning any update in near future.
 
 Decrypt the media cache of Telegram Desktop.
 
