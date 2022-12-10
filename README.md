@@ -1,7 +1,6 @@
 # telegram-cache-decryption
 
-~~**NOTICE**: this no longer works and I'm not planning any update in near future.~~
-**Upd**: Dont worry brother, i will do it for you
+**Update**: Last tested to work with Telegram Desktop version: 4.2.4.
 
 Decrypt the media cache of Telegram Desktop.
 
